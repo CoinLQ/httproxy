@@ -47,7 +47,7 @@ Options:
 __version__ = "0.9.0"
 
 import atexit
-from BaseHTTPServer import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import errno
 import ftplib
 import functools
@@ -58,11 +58,14 @@ import re
 import select
 import signal
 import socket
-import SocketServer
+import socketserver
 import sys
 import threading
 from time import sleep
-import urlparse
+try:
+    import urlparse
+except ImportError:
+    import urllib.parse as urlparse
 
 from configparser import ConfigParser
 from docopt import docopt
@@ -99,12 +102,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
             logging.DEBUG, "Connect to %s:%d", host_port[0], host_port[1])
         try:
             soc.connect(host_port)
-        except socket.error, arg:
+        except OSError as arg:
             try:
                 msg = arg[1]
             except Exception:
                 msg = arg
-            self.send_error(404, msg)
+            if (type(arg) != socket.gaierror):
+                self.send_error(404, msg)
+            else:
+                self.send_error(404, "nodename nor servname provided, or not known")
             return 0
         return 1
 
@@ -113,10 +119,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         try:
             if self._connect_to(self.path, soc):
                 self.log_request(200)
-                self.wfile.write(self.protocol_version +
-                                 " 200 Connection established\r\n")
-                self.wfile.write("Proxy-agent: %s\r\n" % self.version_string())
-                self.wfile.write("\r\n")
+                self.wfile.write((self.protocol_version +
+                                 " 200 Connection established\r\n").encode())
+                self.wfile.write(("Proxy-agent: %s\r\n" % self.version_string()).encode())
+                self.wfile.write(("\r\n").encode())
                 self._read_write(soc, 300)
         finally:
             soc.close()
@@ -133,17 +139,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if scm == 'http':
                 if self._connect_to(netloc, soc):
                     self.log_request()
-                    soc.send("%s %s %s\r\n" % (
+                    _cmd = "%s %s %s\r\n" % (
                         self.command, urlparse.urlunparse(
                             ('', '', path, params, query, '')),
                         self.request_version,
-                    ))
+                    )
+                    soc.send(_cmd.encode())
                     self.headers['Connection'] = 'close'
                     del self.headers['Proxy-Connection']
                     for key_val in self.headers.items():
                         self.log_verbose("%s: %s", *key_val)
-                        soc.send("%s: %s\r\n" % key_val)
-                    soc.send("\r\n")
+                        soc.send(("%s: %s\r\n" % key_val).encode())
+                    soc.send(("\r\n").encode())
                     self._read_write(soc)
             elif scm == 'ftp':
                 # fish out user and password information
@@ -163,7 +170,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                     if self.command == "GET":
                         ftp.retrbinary("RETR %s" % path, self.connection.send)
                     ftp.quit()
-                except Exception, e:
+                except Exception as e:
                     self.server.logger.log(
                         logging.WARNING, "FTP Exception: %s", e
                     )
@@ -174,7 +181,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
     def handle_one_request(self):
         try:
             BaseHTTPRequestHandler.handle_one_request(self)
-        except socket.error, e:
+        except OSError as e:
             if e.errno == errno.ECONNRESET:
                 pass   # ignore the error
             else:
@@ -204,7 +211,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                         count = 0
             if count == max_idling:
                 break
-        result = "".join(local_data)
+        result = local_data[0].decode('utf-8', 'ignore')
         if self.verbose:
             ht = HEADER_TERMINATOR.search(result)
             if ht:
@@ -237,7 +244,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         )
 
 
-class ThreadingHTTPServer(SocketServer.ThreadingMixIn, HTTPServer):
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
     def __init__(self, server_address, RequestHandlerClass, logger=None):
         HTTPServer.__init__(self, server_address, RequestHandlerClass)
         self.logger = logger
@@ -456,7 +463,7 @@ def main():
         for name in args['<allowed-client>']:
             try:
                 client = socket.gethostbyname(name)
-            except socket.error, e:
+            except OSError as e:
                 logger.log(logging.CRITICAL, "%s: %s. Exiting." % (name, e))
                 return 3
             allowed.append(client)
@@ -486,7 +493,7 @@ def main():
                     threading.activeCount()
                 )
                 req_count = 0
-        except select.error, e:
+        except OSError as e:
             if e[0] != 4 or not shutdown_in_progress.isSet():
                 logger.log(logging.CRITICAL, "Errno: %d - %s", e[0], e[1])
         except StopServing:
